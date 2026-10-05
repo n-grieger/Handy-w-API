@@ -393,9 +393,19 @@ impl ShortcutAction for TranscribeAction {
         let tm = app.state::<Arc<TranscriptionManager>>();
         let rm = app.state::<Arc<AudioRecordingManager>>();
 
-        // Load ASR model and VAD model in parallel
+        // When a remote (OpenAI-compatible) speech endpoint is configured, we
+        // transcribe on the server and must not load a local model or open a
+        // local streaming worker at all.
+        let settings = get_settings(app);
+        let using_remote = settings
+            .active_remote_speech_provider()
+            .is_some_and(|_| !settings.active_remote_speech_model().trim().is_empty());
+
+        // Load ASR model and VAD model in parallel (local path only)
         let kickoff_started = Instant::now();
-        tm.initiate_model_load();
+        if !using_remote {
+            tm.initiate_model_load();
+        }
         let rm_clone = Arc::clone(&rm);
         std::thread::spawn(move || {
             if let Err(e) = rm_clone.preload_vad() {
@@ -424,7 +434,6 @@ impl ShortcutAction for TranscribeAction {
 
         // Get the microphone mode to determine audio feedback timing
         let plan_started = Instant::now();
-        let settings = get_settings(app);
         let is_always_on = settings.always_on_microphone;
 
         let selected_model_info = app
@@ -434,10 +443,12 @@ impl ShortcutAction for TranscribeAction {
         // Use the app-facing model capability as the single pre-recording source
         // for live streaming decisions. Unknown support is represented as false
         // until the model registry is updated by discovery or runtime load.
-        let model_supports_streaming = selected_model_info
-            .as_ref()
-            .map(|m| m.supports_streaming)
-            .unwrap_or(false);
+        // Remote transcription has no local streaming worker, so it never streams.
+        let model_supports_streaming = !using_remote
+            && selected_model_info
+                .as_ref()
+                .map(|m| m.supports_streaming)
+                .unwrap_or(false);
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if model_supports_streaming {
@@ -644,20 +655,50 @@ impl ShortcutAction for TranscribeAction {
                         crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
                     });
 
-                    // Transcribe concurrently with WAV save. If a live stream was
-                    // running, finalize it and use its text (all audio was already
-                    // fed to the stream); otherwise batch-transcribe the samples.
+                    // Transcribe concurrently with WAV save. Remote speech
+                    // (OpenAI-compatible endpoint) is sent to the server; the
+                    // local path finalizes any live stream or batch-transcribes.
                     let transcription_time = Instant::now();
-                    let transcription_result = match tm.finalize_stream() {
-                        // A finalized stream with usable text wins. An empty result
-                        // (no active stream, produced nothing, or a finalize error
-                        // after the engine was returned) falls back to a full batch
-                        // transcription of the same audio. A finalize timeout is
-                        // surfaced instead — the worker may still hold the engine,
-                        // so a batch fallback would contend with it.
-                        Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
-                        Ok(_) => tm.transcribe(samples),
-                        Err(err) => Err(err),
+                    // Re-read settings at transcription time so a remote endpoint
+                    // configured after recording started is still respected.
+                    let settings = get_settings(&ah);
+                    // Same gate as the start path: a remote endpoint is used only
+                    // when one is selected with a base URL AND a model configured.
+                    let remote_configured = settings
+                        .active_remote_speech_provider()
+                        .cloned()
+                        .filter(|_| !settings.active_remote_speech_model().trim().is_empty());
+                    let transcription_result = match remote_configured {
+                        Some(remote_provider) => {
+                            let api_key = settings.active_remote_speech_api_key();
+                            let model = settings.active_remote_speech_model();
+                            let language = settings.selected_language.clone();
+                            debug!(
+                                "Using remote speech endpoint '{}' (model: {}) for transcription",
+                                crate::llm_client::sanitized_url_for_log(&remote_provider.base_url),
+                                model
+                            );
+                            crate::speech_client::transcribe_audio(
+                                &remote_provider,
+                                &api_key,
+                                &model,
+                                samples.clone(),
+                                Some(language),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                        }
+                        None => match tm.finalize_stream() {
+                            // A finalized stream with usable text wins. An empty result
+                            // (no active stream, produced nothing, or a finalize error
+                            // after the engine was returned) falls back to a full batch
+                            // transcription of the same audio. A finalize timeout is
+                            // surfaced instead — the worker may still hold the engine,
+                            // so a batch fallback would contend with it.
+                            Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
+                            Ok(_) => tm.transcribe(samples),
+                            Err(err) => Err(err),
+                        },
                     };
 
                     // Await WAV save and verify

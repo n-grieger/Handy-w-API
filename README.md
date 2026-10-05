@@ -82,6 +82,23 @@ Control Handy from [Raycast](https://www.raycast.com) — start/stop recording, 
 
 [Source](https://github.com/mattiacolombomc/raycast-handy) · by [@mattiacolombomc](https://github.com/mattiacolombomc)
 
+### Remote Speech-to-Text (OpenAI-compatible API)
+
+By default Handy runs a local model. If you host a speech endpoint that exposes an
+OpenAI-compatible `/v1/audio/transcriptions` API — for example a self-hosted
+`whisper-large-v3` server — you can route dictation to it instead.
+
+1. Open **Settings → Models**
+2. Under **Remote Speech-to-Text**, set **Endpoint** to **Custom (OpenAI-compatible)**
+3. Enter the **Base URL** of your endpoint (e.g. `http://localhost:8000/v1`)
+4. Add an **API key** if your endpoint requires one (optional; sent as a Bearer token)
+5. Set the **Model** your endpoint accepts (e.g. `whisper-large-v3`). Use the refresh
+   button to list models from the endpoint's `/v1/models` route.
+
+With a base URL **and** a model configured, Handy sends the recording to your server
+and pastes the returned transcript. With either unset, it falls back to the local model.
+Your audio is only sent to the endpoint you specify — Handy does not upload audio to
+any third party.
 ### Debug Mode
 
 Handy includes an advanced debug mode for development and troubleshooting. Access it by pressing:

@@ -107,6 +107,18 @@ pub struct PostProcessProvider {
     pub supports_structured_output: bool,
 }
 
+/// A hosted, OpenAI-compatible speech-to-text endpoint (the
+/// `/v1/audio/transcriptions` Whisper API). When the active remote-speech
+/// provider is configured with a base URL, Handy routes dictation to it
+/// instead of running a local model — useful for a self-hosted
+/// `whisper-large-v3` server on the user's own network.
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct RemoteSpeechProvider {
+    pub id: String,
+    pub label: String,
+    pub base_url: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlayPosition {
@@ -469,6 +481,18 @@ pub struct AppSettings {
     pub post_process_prompts: Vec<LLMPrompt>,
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
+    /// Hosted OpenAI-compatible speech endpoint to use for transcription
+    /// instead of a local model. When `remote_speech_provider_id` resolves to a
+    /// provider whose base URL is non-empty, dictation is sent to
+    /// `{base_url}/audio/transcriptions`.
+    #[serde(default = "default_remote_speech_provider_id")]
+    pub remote_speech_provider_id: String,
+    #[serde(default = "default_remote_speech_providers")]
+    pub remote_speech_providers: Vec<RemoteSpeechProvider>,
+    #[serde(default = "default_remote_speech_api_keys")]
+    pub remote_speech_api_keys: SecretMap,
+    #[serde(default = "default_remote_speech_models")]
+    pub remote_speech_models: HashMap<String, String>,
     #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
@@ -667,6 +691,52 @@ fn default_show_tray_icon() -> bool {
 
 fn default_post_process_provider_id() -> String {
     "openai".to_string()
+}
+
+/// Default remote-speech provider selection is "none" (local models). Users
+/// pick "custom" and enter their self-hosted endpoint to enable remote STT.
+fn default_remote_speech_provider_id() -> String {
+    "none".to_string()
+}
+
+/// Predefined remote speech providers. "none" means "use local models";
+/// "custom" is the self-hosted OpenAI-compatible endpoint. More cloud presets
+/// can be added here later.
+fn default_remote_speech_providers() -> Vec<RemoteSpeechProvider> {
+    vec![
+        RemoteSpeechProvider {
+            id: "none".to_string(),
+            label: "Local (default)".to_string(),
+            base_url: String::new(),
+        },
+        RemoteSpeechProvider {
+            id: "custom".to_string(),
+            label: "Custom (OpenAI-compatible)".to_string(),
+            base_url: String::new(),
+        },
+    ]
+}
+
+fn default_remote_speech_api_keys() -> SecretMap {
+    let mut map = HashMap::new();
+    for provider in default_remote_speech_providers() {
+        map.insert(provider.id, String::new());
+    }
+    SecretMap(map)
+}
+
+fn default_remote_speech_models() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for provider in default_remote_speech_providers() {
+        // whisper-large-v3 is a sensible default for a self-hosted Whisper API.
+        let default_model = if provider.id == "custom" {
+            "whisper-large-v3".to_string()
+        } else {
+            String::new()
+        };
+        map.insert(provider.id.clone(), default_model);
+    }
+    map
 }
 
 fn default_post_process_providers() -> Vec<PostProcessProvider> {
@@ -875,6 +945,50 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
     changed
 }
 
+/// Add any remote-speech providers that are new in this build to an existing
+/// store, and backfill their (empty) API keys and the custom provider's default
+/// model. Mirrors [`ensure_post_process_defaults`].
+fn ensure_remote_speech_defaults(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    for provider in default_remote_speech_providers() {
+        if !settings
+            .remote_speech_providers
+            .iter()
+            .any(|p| p.id == provider.id)
+        {
+            settings.remote_speech_providers.push(provider.clone());
+            changed = true;
+        }
+
+        if !settings.remote_speech_api_keys.contains_key(&provider.id) {
+            settings
+                .remote_speech_api_keys
+                .insert(provider.id.clone(), String::new());
+            changed = true;
+        }
+
+        // Only the custom provider gets a model default; "none" stays empty.
+        if provider.id == "custom" {
+            match settings.remote_speech_models.get_mut(&provider.id) {
+                Some(existing) => {
+                    if existing.is_empty() {
+                        *existing = "whisper-large-v3".to_string();
+                        changed = true;
+                    }
+                }
+                None => {
+                    settings
+                        .remote_speech_models
+                        .insert(provider.id.clone(), "whisper-large-v3".to_string());
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
 
 pub fn get_default_settings() -> AppSettings {
@@ -970,6 +1084,10 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
+        remote_speech_provider_id: default_remote_speech_provider_id(),
+        remote_speech_providers: default_remote_speech_providers(),
+        remote_speech_api_keys: default_remote_speech_api_keys(),
+        remote_speech_models: default_remote_speech_models(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),
@@ -1022,6 +1140,54 @@ impl AppSettings {
         self.post_process_providers
             .iter_mut()
             .find(|provider| provider.id == provider_id)
+    }
+
+    pub fn remote_speech_provider(&self, provider_id: &str) -> Option<&RemoteSpeechProvider> {
+        self.remote_speech_providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+    }
+
+    pub fn remote_speech_provider_mut(
+        &mut self,
+        provider_id: &str,
+    ) -> Option<&mut RemoteSpeechProvider> {
+        self.remote_speech_providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+    }
+
+    /// The active remote-speech provider, if one is selected and actually has a
+    /// base URL configured. Returns `None` when transcription should run locally
+    /// (provider is "none", unselected, or the custom URL is empty) — this is
+    /// the single gate the transcription pipeline uses to decide remote vs local.
+    pub fn active_remote_speech_provider(&self) -> Option<&RemoteSpeechProvider> {
+        let provider = self
+            .remote_speech_providers
+            .iter()
+            .find(|provider| provider.id == self.remote_speech_provider_id)?;
+        if provider.base_url.trim().is_empty() {
+            return None;
+        }
+        Some(provider)
+    }
+
+    /// The API key for the active remote-speech provider (empty string when none
+    /// is set or no remote provider is active).
+    pub fn active_remote_speech_api_key(&self) -> String {
+        self.remote_speech_api_keys
+            .get(&self.remote_speech_provider_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The model for the active remote-speech provider (empty string when none
+    /// is configured).
+    pub fn active_remote_speech_model(&self) -> String {
+        self.remote_speech_models
+            .get(&self.remote_speech_provider_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -1076,6 +1242,10 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
     };
 
     if ensure_post_process_defaults(&mut settings) {
+        store.set("settings", serde_json::to_value(&settings).unwrap());
+    }
+
+    if ensure_remote_speech_defaults(&mut settings) {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 

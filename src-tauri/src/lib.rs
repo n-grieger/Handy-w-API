@@ -21,6 +21,7 @@ mod secure_input;
 mod settings;
 mod shortcut;
 mod signal_handle;
+mod speech_client;
 mod transcription_coordinator;
 mod tray;
 mod tray_i18n;
@@ -687,6 +688,11 @@ pub fn run(cli_args: CliArgs) {
             shortcut::update_post_process_prompt,
             shortcut::delete_post_process_prompt,
             shortcut::set_post_process_selected_prompt,
+            commands::remote_speech::set_remote_speech_provider,
+            commands::remote_speech::change_remote_speech_base_url,
+            commands::remote_speech::change_remote_speech_api_key,
+            commands::remote_speech::change_remote_speech_model,
+            commands::remote_speech::fetch_remote_speech_models,
             shortcut::update_custom_words,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,

@@ -22,6 +22,7 @@ interface SettingsStore {
   outputDevices: AudioDevice[];
   customSounds: { start: boolean; stop: boolean };
   postProcessModelOptions: Record<string, string[]>;
+  remoteSpeechModelOptions: Record<string, string[]>;
   // null until loadUpdateChecksLocked() resolves
   updateChecksLocked: boolean | null;
 
@@ -44,6 +45,12 @@ interface SettingsStore {
   playTestSound: (soundType: "start" | "stop") => Promise<void>;
   checkCustomSounds: () => Promise<void>;
   setPostProcessProvider: (providerId: string) => Promise<void>;
+  setRemoteSpeechProvider: (providerId: string) => Promise<void>;
+  updateRemoteSpeechBaseUrl: (providerId: string, baseUrl: string) => Promise<void>;
+  updateRemoteSpeechApiKey: (providerId: string, apiKey: string) => Promise<void>;
+  updateRemoteSpeechModel: (providerId: string, model: string) => Promise<void>;
+  fetchRemoteSpeechModels: (providerId: string) => Promise<string[]>;
+  setRemoteSpeechModelOptions: (providerId: string, models: string[]) => void;
   updatePostProcessSetting: (
     settingType: "base_url" | "api_key" | "model",
     providerId: string,
@@ -209,6 +216,7 @@ export const useSettingsStore = create<SettingsStore>()(
     outputDevices: [],
     customSounds: { start: false, stop: false },
     postProcessModelOptions: {},
+    remoteSpeechModelOptions: {},
     updateChecksLocked: null,
 
     // Internal setters
@@ -597,6 +605,130 @@ export const useSettingsStore = create<SettingsStore>()(
       set((state) => ({
         postProcessModelOptions: {
           ...state.postProcessModelOptions,
+          [providerId]: models,
+        },
+      })),
+
+    setRemoteSpeechProvider: async (providerId) => {
+      const {
+        settings,
+        setUpdating,
+        refreshSettings,
+        setRemoteSpeechModelOptions,
+      } = get();
+      const updateKey = "remote_speech_provider_id";
+      const previousId = settings?.remote_speech_provider_id ?? null;
+
+      setUpdating(updateKey, true);
+      if (settings) {
+        set((state) => ({
+          settings: state.settings
+            ? { ...state.settings, remote_speech_provider_id: providerId }
+            : null,
+        }));
+      }
+      setRemoteSpeechModelOptions(providerId, []);
+
+      try {
+        await commands.setRemoteSpeechProvider(providerId);
+        await refreshSettings();
+      } catch (error) {
+        console.error("Failed to set remote speech provider:", error);
+        if (previousId !== null) {
+          set((state) => ({
+            settings: state.settings
+              ? {
+                  ...state.settings,
+                  remote_speech_provider_id: previousId,
+                }
+              : null,
+          }));
+        }
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    updateRemoteSpeechBaseUrl: async (providerId, baseUrl) => {
+      const { setUpdating, refreshSettings } = get();
+      const updateKey = `remote_speech_base_url:${providerId}`;
+      setUpdating(updateKey, true);
+      try {
+        await commands.changeRemoteSpeechBaseUrl(providerId, baseUrl);
+        // Clear cached models — the previous ones likely don't apply to a new URL.
+        set((state) => ({
+          remoteSpeechModelOptions: {
+            ...state.remoteSpeechModelOptions,
+            [providerId]: [],
+          },
+        }));
+        await refreshSettings();
+      } catch (error) {
+        console.error("Failed to update remote speech base URL:", error);
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    updateRemoteSpeechApiKey: async (providerId, apiKey) => {
+      const { setUpdating, refreshSettings } = get();
+      const updateKey = `remote_speech_api_key:${providerId}`;
+      set((state) => ({
+        remoteSpeechModelOptions: {
+          ...state.remoteSpeechModelOptions,
+          [providerId]: [],
+        },
+      }));
+      setUpdating(updateKey, true);
+      try {
+        await commands.changeRemoteSpeechApiKey(providerId, apiKey);
+        await refreshSettings();
+      } catch (error) {
+        console.error("Failed to update remote speech API key:", error);
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    updateRemoteSpeechModel: async (providerId, model) => {
+      const { setUpdating, refreshSettings } = get();
+      const updateKey = `remote_speech_model:${providerId}`;
+      setUpdating(updateKey, true);
+      try {
+        await commands.changeRemoteSpeechModel(providerId, model);
+        await refreshSettings();
+      } catch (error) {
+        console.error("Failed to update remote speech model:", error);
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    fetchRemoteSpeechModels: async (providerId) => {
+      const updateKey = `remote_speech_models_fetch:${providerId}`;
+      const { setUpdating, setRemoteSpeechModelOptions } = get();
+      setUpdating(updateKey, true);
+      try {
+        const result = await commands.fetchRemoteSpeechModels(providerId);
+        if (result.status === "ok") {
+          setRemoteSpeechModelOptions(providerId, result.data);
+          return result.data;
+        } else {
+          console.error("Failed to fetch remote speech models:", result.error);
+          return [];
+        }
+      } catch (error) {
+        console.error("Failed to fetch remote speech models:", error);
+        return [];
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    setRemoteSpeechModelOptions: (providerId, models) =>
+      set((state) => ({
+        remoteSpeechModelOptions: {
+          ...state.remoteSpeechModelOptions,
           [providerId]: models,
         },
       })),
