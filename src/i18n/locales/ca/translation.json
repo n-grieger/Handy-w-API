@@ -645,6 +645,34 @@
           "details": "La transcripció local de veu a text del Handy es basa en el transcribe.cpp i el ggml. Gràcies a la gran feina de Georgi Gerganov i dels col·laboradors."
         }
       }
+    },
+    "remoteSpeech": {
+      "title": "Remote Speech-to-Text",
+      "description": "Send dictation to a hosted, OpenAI-compatible speech endpoint (e.g. a self-hosted whisper-large-v3) instead of a local model.",
+      "provider": {
+        "title": "Endpoint",
+        "description": "Choose which endpoint to transcribe with. \"Local (default)\" keeps transcription on-device."
+      },
+      "baseUrl": {
+        "title": "Base URL",
+        "description": "The OpenAI-compatible base URL of your speech endpoint, e.g. http://localhost:8000/v1",
+        "placeholder": "http://localhost:8000/v1"
+      },
+      "apiKey": {
+        "title": "API Key",
+        "description": "Optional. Sent as a Bearer token if your endpoint requires authentication.",
+        "placeholder": "e.g. sk-... (leave blank if none)"
+      },
+      "model": {
+        "title": "Model",
+        "description": "Model name your endpoint accepts for transcription, e.g. whisper-large-v3.",
+        "placeholder": "whisper-large-v3",
+        "refresh": "Fetch available models"
+      },
+      "status": {
+        "remote": "Transcribing via {{url}} ({{model}})",
+        "local": "Using local models"
+      }
     }
   },
   "footer": {
