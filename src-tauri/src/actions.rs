@@ -1,10 +1,11 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
-use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
-use crate::managers::audio::AudioRecordingManager;
+use crate::audio_toolkit::VadPolicy;
+use crate::managers::audio::{recording_error_type, AudioRecordingManager};
 use crate::managers::history::HistoryManager;
 use crate::managers::model::ModelManager;
+use crate::managers::transcription::policy::{live_decode, LiveDecode, ModelTraits};
 use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
@@ -415,8 +416,9 @@ impl ShortcutAction for TranscribeAction {
         let kickoff_elapsed = kickoff_started.elapsed();
 
         // Don't open the mic if nothing can transcribe the recording; the load
-        // kicked off above fails and reports why.
-        if !tm.is_model_loaded() {
+        // kicked off above fails and reports why. A remote endpoint transcribes
+        // the audio itself, so the local model check only guards the local path.
+        if !using_remote && !tm.is_model_loaded() {
             let selected_model = get_settings(app).selected_model;
             if let Err(e) = app
                 .state::<Arc<ModelManager>>()
@@ -456,7 +458,14 @@ impl ShortcutAction for TranscribeAction {
         } else {
             VadPolicy::Offline
         };
-        if model_supports_streaming {
+        // Before the model loads, whether it keeps its accuracy on long audio
+        // is unknown, so assume not: the worker decides again with the loaded
+        // model, and a wrong guess costs only an idle worker.
+        let expected_model = ModelTraits {
+            streaming: model_supports_streaming,
+            long_form: false,
+        };
+        if live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None {
             tm.start_stream();
         }
         let plan_elapsed = plan_started.elapsed();
@@ -481,7 +490,7 @@ impl ShortcutAction for TranscribeAction {
         );
         debug!("Microphone mode - always_on: {}", is_always_on);
 
-        let mut recording_error: Option<String> = None;
+        let mut recording_error: Option<anyhow::Error> = None;
         let recording_start_time = Instant::now();
         match rm.try_start_recording(&binding_id, vad_policy) {
             Ok(readiness) => {
@@ -549,18 +558,11 @@ impl ShortcutAction for TranscribeAction {
             utils::hide_recording_overlay(app);
             set_tray_state(app, TrayIconState::Idle);
             if let Some(err) = recording_error {
-                let error_type = if is_microphone_access_denied(&err) {
-                    "microphone_permission_denied"
-                } else if is_no_input_device_error(&err) {
-                    "no_input_device"
-                } else {
-                    "unknown"
-                };
                 let _ = app.emit(
                     "recording-error",
                     RecordingErrorEvent {
-                        error_type: error_type.to_string(),
-                        detail: Some(err),
+                        error_type: recording_error_type(&err).to_string(),
+                        detail: Some(format!("{err:#}")),
                     },
                 );
             }
@@ -657,7 +659,10 @@ impl ShortcutAction for TranscribeAction {
 
                     // Transcribe concurrently with WAV save. Remote speech
                     // (OpenAI-compatible endpoint) is sent to the server; the
-                    // local path finalizes any live stream or batch-transcribes.
+                    // local path uses the live decode's result when it has one
+                    // (all audio was already fed to it), otherwise a batch run
+                    // of the samples. A cancel is surfaced as an error, so it
+                    // never starts a batch run.
                     let transcription_time = Instant::now();
                     // Re-read settings at transcription time so a remote endpoint
                     // configured after recording started is still respected.
@@ -688,17 +693,7 @@ impl ShortcutAction for TranscribeAction {
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))
                         }
-                        None => match tm.finalize_stream() {
-                            // A finalized stream with usable text wins. An empty result
-                            // (no active stream, produced nothing, or a finalize error
-                            // after the engine was returned) falls back to a full batch
-                            // transcription of the same audio. A finalize timeout is
-                            // surfaced instead — the worker may still hold the engine,
-                            // so a batch fallback would contend with it.
-                            Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
-                            Ok(_) => tm.transcribe(samples),
-                            Err(err) => Err(err),
-                        },
+                        None => tm.transcribe_recording(samples),
                     };
 
                     // Await WAV save and verify
